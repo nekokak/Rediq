@@ -2,27 +2,65 @@ package Rediq;
 use strict;
 use warnings;
 our $VERSION = '0.01';
-use Redis::hiredis;
+use RedisDB;
 
 sub new {
     my ($class, $opts) = @_;
 
-    my $redis = Redis::hiredis->new();
-    $redis->connect($opts->{host}||'127.0.0.1', $opts->{port}||6379);
-
+    my $redis = RedisDB->new(
+        host => ($opts->{host}||'localhost'),
+        port => ($opts->{port}||6379)
+    );
     bless +{
         redis => $redis,
     }, $class;
 }
 
+sub redis { $_[0]->{redis} }
+
 sub enqueue {
     my ($self, $key, $job) = @_;
-    $self->{redis}->command(["RPUSH", $key, $job]);
+    $self->redis->rpush($key, $job);
 }
 
 sub dequeue {
-    my ($self, $key) = @_;
-    $self->{redis}->command(["LPOP", $key]);
+    my ($self, $key, $limit) = @_;
+
+    my $range = $limit ? $limit - 1 : -1;
+    my $redis = $self->redis;
+    $redis->multi;
+    $redis->lrange($key, 0, $range);
+    my $res = $redis->exec;
+
+    if (my $tasks = $res->[0]) {
+        return Rediq::Task->new($self, $key, $tasks);
+    }
+    else {
+        return;
+    }
+}
+
+sub queue_end {
+    my ($self, $key, $len) = @_;
+    $self->redis->ltrim($key, $len, -1);
+}
+
+package 
+  Rediq::Task;
+
+sub new {
+    my ($class, $klass, $key, $tasks) = @_;
+    bless +{
+        klass => $klass,
+        key   => $key,
+        tasks => $tasks,
+        len   => scalar(@{$tasks}),
+    }, $class;
+}
+
+sub end {
+    my $self = shift;
+    $self->{klass}->queue_end($self->{key}, $self->{len});
 }
 
 1;
